@@ -1,7 +1,7 @@
 {
-	"name": "@charmland/pi-hyper-provider",
+	"name": "pi-hyper-tools",
 	"version": "0.3.2",
-	"description": "Pi extension for Charm's Hyper inference provider",
+	"description": "Enhanced Pi extension for Charm Hyper with dashboard, live rate limits, and usage analytics",
 	"license": "MIT",
 	"keywords": [
 		"pi-package"
@@ -20,7 +20,8 @@
 		"fmt": "biome format --write .",
 		"lint": "biome lint .",
 		"check:biome": "biome check --write .",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "tsx --test test/*.test.ts"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -31,12 +32,13 @@
 		"@biomejs/biome": "^2.4.16",
 		"@earendil-works/pi-ai": "^0.84.1",
 		"@earendil-works/pi-coding-agent": "^0.84.1",
+		"tsx": "^4.23.13",
 		"typebox": "^1.1.38",
 		"typescript": "^6.0.3"
 	},
 	"type": "module",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/charmbracelet/pi-hyper-provider"
+		"url": "https://github.com/samuelrubiodev/pi-hyper-tools"
 	}
 }

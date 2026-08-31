@@ -3,7 +3,7 @@ import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Compile } from "typebox/compile";
 import * as httpClient from "./http.js";
-import { HYPER_API_BASE_URL, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
+import { HYPER_API_BASE_URL, HYPER_GEM, HYPERCREDITS_PER_USD, hyperJsonHeaders, PROVIDER_NAME } from "./hyper.js";
 import type { WarningSink } from "./notify.js";
 import { parseSchema } from "./schema.js";
 import {
@@ -14,13 +14,12 @@ import {
 	writeHyperStatusItems,
 } from "./settings.js";
 
-const HYPER_GEM = "\x1b[38;2;255;96;255m◆\x1b[39m";
 const CREDITS_FETCH_TIMEOUT_MS = 10_000;
 const CREDITS_RETRY_DELAY_MS_INITIAL = 5_000;
 const CREDITS_RETRY_DELAY_MS_MAX = 5 * 60_000;
 const CREDITS_RETRY_EXPONENT_MAX = 6;
 
-const CreditsPayloadSchema = Type.Union([
+export const CreditsPayloadSchema = Type.Union([
 	Type.Object(
 		{
 			balance: Type.Number(),
@@ -34,19 +33,25 @@ const CreditsPayloadSchema = Type.Union([
 		{ additionalProperties: false },
 	),
 ]);
-const CreditsPayloadValidator = Compile(CreditsPayloadSchema);
+export const CreditsPayloadValidator = Compile(CreditsPayloadSchema);
 
-async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number | undefined> {
+export function parseCreditsPayload(payload: unknown): number | undefined {
+	const credits = parseSchema(CreditsPayloadValidator, payload, "Hyper /credits response");
+	if ("balance" in credits) return credits.balance;
+	if ("balance_usd" in credits) return credits.balance_usd * HYPERCREDITS_PER_USD;
+	return undefined;
+}
+
+export async function fetchCredits(apiKey: string, signal: AbortSignal): Promise<number | undefined> {
 	const payload = await httpClient.fetchJson(`${HYPER_API_BASE_URL}/credits`, {
 		headers: hyperJsonHeaders({ Authorization: `Bearer ${apiKey}` }),
 		signal,
 		timeoutMs: CREDITS_FETCH_TIMEOUT_MS,
 	});
-	const credits = parseSchema(CreditsPayloadValidator, payload, "Hyper /credits response");
-	return "balance" in credits ? credits.balance : undefined;
+	return parseCreditsPayload(payload);
 }
 
-function isTransientCreditError(error: unknown): boolean {
+export function isTransientCreditError(error: unknown): boolean {
 	return (
 		error instanceof httpClient.HttpNetworkError ||
 		error instanceof httpClient.HttpTimeoutError ||
@@ -55,9 +60,18 @@ function isTransientCreditError(error: unknown): boolean {
 	);
 }
 
-function formatCredits(balance: number): string {
+export function formatCredits(balance: number): string {
 	if (Number.isInteger(balance)) return balance.toLocaleString("en-US");
-	return balance.toLocaleString("en-US", { maximumFractionDigits: 2 });
+	return balance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+export function formatUsd(usd: number): string {
+	return usd.toLocaleString("en-US", {
+		style: "currency",
+		currency: "USD",
+		minimumFractionDigits: 2,
+		maximumFractionDigits: usd < 0.01 && usd > 0 ? 4 : 2,
+	});
 }
 
 function isHyperModel(model: ExtensionContext["model"]): model is NonNullable<ExtensionContext["model"]> {
@@ -84,7 +98,10 @@ function storedTeamName(): string | undefined {
 
 export interface CreditStatusRuntime {
 	handleCommand(args: string, ctx: ExtensionCommandContext): Promise<void>;
-	refresh(ctx: ExtensionContext, selectedModel: ExtensionContext["model"]): Promise<void>;
+	refresh(ctx: ExtensionContext, selectedModel: ExtensionContext["model"], isUserRequested?: boolean): Promise<void>;
+	getBalance(): number | undefined;
+	getLastRefreshedAt(): Date | undefined;
+	getLastError(): string | undefined;
 	dispose(): void;
 }
 
@@ -102,6 +119,8 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 	let retryAtMs = 0;
 	let currentApiKey: string | undefined;
 	let cachedBalance: number | undefined;
+	let lastRefreshedAt: Date | undefined;
+	let lastError: string | undefined;
 	let statusItemsCache: HyperStatusItems | undefined;
 	let inFlight:
 		| { apiKey: string; credentialEpoch: number; controller: AbortController; operation: Promise<void> }
@@ -153,10 +172,13 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			const balance = await fetchCredits(lease.apiKey, signal);
 			if (disposed || !ownsCredential(lease)) return;
 			cachedBalance = balance;
+			lastRefreshedAt = new Date();
+			lastError = undefined;
 			consecutiveFailures = 0;
 			retryAtMs = 0;
 		} catch (error) {
 			if (disposed || !ownsCredential(lease)) throw error;
+			lastError = String(error);
 			if (!isTransientCreditError(error)) {
 				clearCreditState();
 				throw error;
@@ -301,8 +323,20 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 			if (result.kind === "changed") await refreshStatus(ctx, ctx.model, true);
 		},
 
-		refresh(ctx, selectedModel) {
-			return refreshStatus(ctx, selectedModel);
+		refresh(ctx, selectedModel, isUserRequested = false) {
+			return refreshStatus(ctx, selectedModel, isUserRequested);
+		},
+
+		getBalance() {
+			return cachedBalance;
+		},
+
+		getLastRefreshedAt() {
+			return lastRefreshedAt;
+		},
+
+		getLastError() {
+			return lastError;
 		},
 
 		dispose() {

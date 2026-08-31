@@ -55,9 +55,14 @@ const ProviderPayloadSchema = Type.Object(
 );
 const ProviderPayloadValidator = Compile(ProviderPayloadSchema);
 
-type ProviderModel = Static<typeof ProviderModelSchema>;
+export type ProviderModel = Static<typeof ProviderModelSchema>;
 
-function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
+export function parseProviderPayload(payload: unknown): ProviderModel[] {
+	const provider = parseSchema(ProviderPayloadValidator, payload, "Hyper /provider response");
+	return provider.models;
+}
+
+export function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
 	const reasoningLevels = model.reasoning_levels ?? [];
 	const supportsReasoningEffort = reasoningLevels.length > 0;
@@ -94,7 +99,7 @@ function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 	};
 }
 
-function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
+export function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 	if (levels.length === 0) return undefined;
 	const availableLevels = new Set<string>(levels);
 	const disabledReasoningLevel = levels.find((level) => level === "off" || level === "none") ?? null;
@@ -105,6 +110,35 @@ function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 		result[level] = availableLevels.has(level) ? level : null;
 	}
 	return result;
+}
+
+const cachedModelsMap = new Map<string, Model<"openai-completions">>();
+const cachedRawModelsMap = new Map<string, ProviderModel>();
+
+export function getCachedHyperModels(): Model<"openai-completions">[] {
+	return Array.from(cachedModelsMap.values());
+}
+
+export function getCachedHyperModel(modelId: string): Model<"openai-completions"> | undefined {
+	const normalized = modelId.startsWith("hyper/") ? modelId.slice(6) : modelId;
+	return cachedModelsMap.get(normalized) ?? cachedModelsMap.get(modelId);
+}
+
+export function getCachedRawModel(modelId: string): ProviderModel | undefined {
+	const normalized = modelId.startsWith("hyper/") ? modelId.slice(6) : modelId;
+	return cachedRawModelsMap.get(normalized) ?? cachedRawModelsMap.get(modelId);
+}
+
+export function updateCachedHyperModels(models: ProviderModel[]): Model<"openai-completions">[] {
+	cachedModelsMap.clear();
+	cachedRawModelsMap.clear();
+	const mapped = models.map((raw) => {
+		const m = toProviderModel(raw);
+		cachedModelsMap.set(m.id, m);
+		cachedRawModelsMap.set(raw.id, raw);
+		return m;
+	});
+	return mapped;
 }
 
 export async function fetchHyperModels({
@@ -119,6 +153,6 @@ export async function fetchHyperModels({
 		signal,
 		timeoutMs: MODEL_FETCH_TIMEOUT_MS,
 	});
-	const provider = parseSchema(ProviderPayloadValidator, payload, "Hyper /provider response");
-	return provider.models.map(toProviderModel);
+	const rawModels = parseProviderPayload(payload);
+	return updateCachedHyperModels(rawModels);
 }

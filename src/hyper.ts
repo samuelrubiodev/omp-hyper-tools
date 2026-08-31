@@ -14,6 +14,12 @@ export const HYPER_API_BASE_URL = `${HYPER_BASE_URL}/v1`;
 export const HYPER_API_KEY = "$HYPER_API_KEY";
 export const HYPER_USER_AGENT = `${packageName}/${packageJson.version}`;
 
+/** Conversion rate: 1 Hypercredit = $0.05 USD (20 Hypercredits per $1 USD). */
+export const USD_PER_HYPERCREDIT = 0.05;
+export const HYPERCREDITS_PER_USD = 20;
+
+export const HYPER_GEM = "\x1b[38;2;255;96;255m◆\x1b[39m";
+
 export function hyperProviderDir(): string {
 	return path.join(getAgentDir(), "hyper-provider");
 }
