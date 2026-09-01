@@ -1,12 +1,10 @@
 import { hostname } from "node:os";
-import type { AuthInteraction, OAuthCredential } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { fetchJson, HttpResponseError } from "./http.js";
 import { HYPER_BASE_URL, hyperJsonHeaders } from "./hyper.js";
 import { parseSchema } from "./schema.js";
 
-// Inlined from pi-ai (no longer publicly exported)
 const CANCEL_MESSAGE = "Login cancelled";
 const TIMEOUT_MESSAGE = "Device flow timed out";
 const SLOW_DOWN_TIMEOUT_MESSAGE =
@@ -14,6 +12,44 @@ const SLOW_DOWN_TIMEOUT_MESSAGE =
 const MINIMUM_INTERVAL_MS = 1000;
 const POLL_DEFAULT_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
+
+export interface OAuthAuthInfo {
+	url: string;
+	launchUrl?: string;
+	instructions?: string;
+}
+
+export interface OAuthDeviceCodeNotification {
+	type: "device_code";
+	userCode: string;
+	verificationUri: string;
+	intervalSeconds: number;
+	expiresInSeconds: number;
+}
+
+export interface OAuthLoginCallbacks {
+	onAuth?: (info: OAuthAuthInfo) => void;
+	onPrompt?: (prompt: { message: string }) => Promise<string>;
+	onProgress?: (message: string) => void;
+	signal?: AbortSignal;
+	notify?: (event: OAuthDeviceCodeNotification) => void;
+}
+
+export interface OAuthCredentials {
+	refresh: string;
+	access: string;
+	expires: number;
+	enterpriseUrl?: string;
+	projectId?: string;
+	email?: string;
+	accountId?: string;
+	apiEndpoint?: string;
+	orgId?: string;
+	orgName?: string;
+	authorizedAt?: number;
+	teamName?: string;
+	type?: "oauth";
+}
 
 type OAuthDeviceCodeIncompletePollResult =
 	| { status: "pending" }
@@ -186,7 +222,7 @@ type TokenExchangeResponse =
 	| Static<typeof TokenExchangeWithExpiresInSchema>
 	| Static<typeof TokenExchangeWithExpiresAtSchema>;
 
-class HyperRefreshTokenRejectedError extends Error {
+export class HyperRefreshTokenRejectedError extends Error {
 	readonly kind = "refresh_token_rejected";
 
 	constructor(cause: HttpResponseError) {
@@ -208,7 +244,7 @@ async function initiateDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthRespo
 
 function deviceName(): string {
 	const host = hostname();
-	return host ? `Pi (${host})` : "Pi";
+	return host ? `OMP (${host})` : "OMP";
 }
 
 async function pollDeviceAuth(deviceAuth: DeviceAuthResponse, signal?: AbortSignal): Promise<DevicePollSuccess> {
@@ -267,14 +303,16 @@ function tokenToCredentials(
 	token: TokenExchangeResponse,
 	fallbackRefreshToken: string,
 	metadata?: { teamName?: string },
-): OAuthCredential {
+): OAuthCredentials {
 	const expires = tokenExpiresAtMs(token);
 	return {
 		type: "oauth",
 		refresh: token.refresh_token || fallbackRefreshToken,
 		access: token.access_token,
 		expires,
-		...metadata,
+		orgName: metadata?.teamName,
+		teamName: metadata?.teamName,
+		authorizedAt: Date.now(),
 	};
 }
 
@@ -289,24 +327,39 @@ function tokenExpiresAtMs(token: TokenExchangeResponse): number {
 	return expiresAt - bufferMs;
 }
 
-export async function loginHyper(interaction: AuthInteraction): Promise<OAuthCredential> {
-	const deviceAuth = await initiateDeviceAuth(interaction.signal);
-	interaction.notify({
-		type: "device_code",
-		userCode: deviceAuth.user_code,
-		verificationUri: deviceAuth.verification_url,
-		intervalSeconds: deviceAuth.interval ?? DEFAULT_DEVICE_POLL_INTERVAL_SECONDS,
-		expiresInSeconds: deviceAuth.expires_in,
-	});
+export async function loginHyper(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+	const signal = callbacks.signal;
+	const deviceAuth = await initiateDeviceAuth(signal);
 
-	const deviceToken = await pollDeviceAuth(deviceAuth, interaction.signal);
-	const token = await exchangeRefreshToken(deviceToken.refresh_token, interaction.signal);
+	if (typeof callbacks.onAuth === "function") {
+		callbacks.onAuth({
+			url: deviceAuth.verification_url,
+			instructions: `Enter code: ${deviceAuth.user_code}`,
+		});
+		if (callbacks.onProgress) {
+			callbacks.onProgress(`Waiting for code ${deviceAuth.user_code} at ${deviceAuth.verification_url}...`);
+		}
+	} else if (typeof callbacks.notify === "function") {
+		callbacks.notify({
+			type: "device_code",
+			userCode: deviceAuth.user_code,
+			verificationUri: deviceAuth.verification_url,
+			intervalSeconds: deviceAuth.interval ?? DEFAULT_DEVICE_POLL_INTERVAL_SECONDS,
+			expiresInSeconds: deviceAuth.expires_in,
+		});
+	}
+
+	const deviceToken = await pollDeviceAuth(deviceAuth, signal);
+	const token = await exchangeRefreshToken(deviceToken.refresh_token, signal);
 	return tokenToCredentials(token, deviceToken.refresh_token, {
 		teamName: deviceToken.team_name,
 	});
 }
 
-export async function refreshHyperToken(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential> {
+export async function refreshHyperToken(
+	credential: OAuthCredentials | { refresh: string; teamName?: string; orgName?: string },
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
 	let token: TokenExchangeResponse;
 	try {
 		token = await exchangeRefreshToken(credential.refresh, signal);
@@ -329,7 +382,9 @@ function isRejectedRefreshTokenResponse(error: unknown): error is HttpResponseEr
 	);
 }
 
-function teamNameFromCredentials(credential: OAuthCredential): string | undefined {
-	const teamName = credential.teamName;
+function teamNameFromCredentials(
+	credential: OAuthCredentials | { teamName?: string; orgName?: string },
+): string | undefined {
+	const teamName = "orgName" in credential ? (credential.orgName ?? credential.teamName) : credential.teamName;
 	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
 }

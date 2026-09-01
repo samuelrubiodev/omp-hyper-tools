@@ -90,10 +90,57 @@ function teamNameStatusText(statusItems: HyperStatusItems, teamName: string | un
 }
 
 function storedTeamName(): string | undefined {
-	const credential = readStoredCredential(PROVIDER_NAME);
-	if (credential?.type !== "oauth") return undefined;
-	const teamName = credential.teamName;
-	return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
+	try {
+		const credential = readStoredCredential(PROVIDER_NAME);
+		if (!credential) return undefined;
+		const teamName = (credential as any).orgName ?? (credential as any).teamName;
+		return typeof teamName === "string" && teamName.trim() ? teamName : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function resolveHyperApiKey(
+	ctx: ExtensionContext,
+	selectedModel?: ExtensionContext["model"],
+): Promise<string | undefined> {
+	try {
+		if (selectedModel && selectedModel.provider === PROVIDER_NAME) {
+			const auth = await ctx.modelRegistry?.getApiKeyAndHeaders?.(selectedModel);
+			if (auth?.ok && auth.apiKey) {
+				return auth.apiKey;
+			}
+		}
+	} catch {
+		// continue to provider fallback
+	}
+
+	try {
+		const providerKey = await ctx.modelRegistry?.getApiKeyForProvider?.(PROVIDER_NAME);
+		if (providerKey) {
+			return providerKey;
+		}
+	} catch {
+		// continue to env/storage fallback
+	}
+
+	if (process.env.HYPER_API_KEY) {
+		return process.env.HYPER_API_KEY;
+	}
+
+	try {
+		const credential = readStoredCredential(PROVIDER_NAME);
+		if (credential && (credential as any).access) {
+			return (credential as any).access;
+		}
+		if (credential && (credential as any).key) {
+			return (credential as any).key;
+		}
+	} catch {
+		// ignore
+	}
+
+	return undefined;
 }
 
 export interface CreditStatusRuntime {
@@ -227,7 +274,9 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		const forcedLease: CredentialLease | undefined =
 			isUserRequested && currentApiKey !== undefined ? { apiKey: currentApiKey, credentialEpoch } : undefined;
 		let failureLease: CredentialLease | undefined;
-		if (!isHyperModel(selectedModel)) {
+
+		const isHyper = isHyperModel(selectedModel);
+		if (!isHyper && !isUserRequested) {
 			committedInvocation = invocation;
 			invalidateCredential();
 			ctx.ui.setStatus(PROVIDER_NAME, undefined);
@@ -235,55 +284,54 @@ export function createCreditStatusRuntime(warn: WarningSink): CreditStatusRuntim
 		}
 
 		const statusItems = getStatusItems();
-		if (!statusItems.hypercredits) {
+		if (!statusItems.hypercredits && !isUserRequested) {
 			committedInvocation = invocation;
 			invalidateCredential();
 			renderStatus(ctx);
 			return;
 		}
 
-		// Settings and team metadata do not depend on auth. Re-render them now,
-		// retaining a balance only while it belongs to the committed credential.
-		renderStatus(ctx);
+		// Settings and team metadata do not depend on auth. Re-render them now.
+		if (isHyper) {
+			renderStatus(ctx);
+		}
+
 		try {
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+			const apiKey = await resolveHyperApiKey(ctx, selectedModel);
 			if (disposed) return;
 			const forcedLeaseStillValid =
-				forcedLease !== undefined && auth.ok && auth.apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
+				forcedLease !== undefined && apiKey === forcedLease.apiKey && ownsCredential(forcedLease);
 			if (invocation < committedInvocation && !forcedLeaseStillValid) return;
-			if (!auth.ok || !auth.apiKey) {
+			if (!apiKey) {
 				committedInvocation = invocation;
 				invalidateCredential();
 				currentApiKey = undefined;
 				clearCreditState();
-				renderStatus(ctx);
+				if (isHyper) renderStatus(ctx);
 				return;
 			}
 			if (invocation >= committedInvocation) committedInvocation = invocation;
-			if (!isUserRequested && currentApiKey === auth.apiKey && Date.now() < retryAtMs) {
-				// This auth result supersedes older general state, but a same-credential
-				// forced refresh retains its independent fetch lease.
+			if (!isUserRequested && currentApiKey === apiKey && Date.now() < retryAtMs) {
 				return;
 			}
-			if (currentApiKey !== auth.apiKey) {
-				currentApiKey = auth.apiKey;
+			if (currentApiKey !== apiKey) {
+				currentApiKey = apiKey;
 				invalidateCredential();
 				clearCreditState();
-				// Never show the previous account while the replacement request runs.
-				renderStatus(ctx);
+				if (isHyper) renderStatus(ctx);
 			}
 			const expectedCredentialEpoch = credentialEpoch;
-			const lease = { apiKey: auth.apiKey, credentialEpoch: expectedCredentialEpoch };
+			const lease = { apiKey, credentialEpoch: expectedCredentialEpoch };
 			failureLease = lease;
-			await shareFetch(auth.apiKey, expectedCredentialEpoch);
+			await shareFetch(apiKey, expectedCredentialEpoch);
 			if (disposed) return;
 			if (!canRender(invocation, forcedLease)) return;
-			render(ctx, lease);
+			if (isHyper) render(ctx, lease);
 		} catch {
 			if (disposed) return;
 			if (!canRender(invocation, forcedLease)) return;
 			const failedOperationStillOwnsCredential = failureLease !== undefined && ownsCredential(failureLease);
-			if (failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
+			if (isHyper && failureLease !== undefined && failedOperationStillOwnsCredential) render(ctx, failureLease);
 			if (
 				isUserRequested &&
 				(failedOperationStillOwnsCredential || (failureLease === undefined && invocation === invocationSequence))

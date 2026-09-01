@@ -1,17 +1,18 @@
 import { createRequire } from "node:module";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const require = createRequire(import.meta.url);
 const packageJsonPayload: unknown = require("../package.json");
 const packageJson = parsePackageJson(packageJsonPayload);
-const packageName = packageJson.name.split("/").at(-1) ?? "pi-hyper-provider";
+const packageName = packageJson.name.split("/").at(-1) ?? "omp-hyper-tools";
 
 export const PROVIDER_NAME = "hyper";
 export const PROVIDER_DISPLAY_NAME = "Charm Hyper";
 export const HYPER_BASE_URL = "https://hyper.charm.land";
 export const HYPER_API_BASE_URL = `${HYPER_BASE_URL}/v1`;
-export const HYPER_API_KEY = "$HYPER_API_KEY";
+export const HYPER_API_KEY = "HYPER_API_KEY";
 export const HYPER_USER_AGENT = `${packageName}/${packageJson.version}`;
 
 /** Conversion rate: 1 Hypercredit = $0.05 USD (20 Hypercredits per $1 USD). */
@@ -20,8 +21,20 @@ export const HYPERCREDITS_PER_USD = 20;
 
 export const HYPER_GEM = "\x1b[38;2;255;96;255m◆\x1b[39m";
 
+export function resolveAgentDir(): string {
+	if (process.env.PI_CODING_AGENT_DIR) {
+		return process.env.PI_CODING_AGENT_DIR;
+	}
+	try {
+		return getAgentDir();
+	} catch {
+		const home = os.homedir();
+		return path.join(home, ".omp", "agent");
+	}
+}
+
 export function hyperProviderDir(): string {
-	return path.join(getAgentDir(), "hyper-provider");
+	return path.join(resolveAgentDir(), "hyper-provider");
 }
 
 export function hyperJsonHeaders(headers: Record<string, string> = {}): Record<string, string> {

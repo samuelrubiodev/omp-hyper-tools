@@ -1,16 +1,25 @@
 {
-	"name": "pi-hyper-tools",
-	"version": "0.3.2",
-	"description": "Enhanced Pi extension for Charm Hyper with dashboard, live rate limits, and usage analytics",
+	"name": "omp-hyper-tools",
+	"version": "0.4.0",
+	"description": "Enhanced Oh My Pi (OMP) extension for Charm Hyper with dashboard, live rate limits, and usage analytics",
 	"license": "MIT",
 	"keywords": [
-		"pi-package"
+		"omp-plugin",
+		"omp-extension",
+		"pi-package",
+		"hyper",
+		"charm-hyper"
 	],
 	"files": [
 		"src",
 		"README.md",
 		"LICENSE"
 	],
+	"omp": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
 	"pi": {
 		"extensions": [
 			"./src/index.ts"
@@ -21,11 +30,11 @@
 		"lint": "biome lint .",
 		"check:biome": "biome check --write .",
 		"typecheck": "tsc --noEmit",
-		"test": "tsx --test test/*.test.ts"
+		"test": "bun test"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
+		"@oh-my-pi/pi-ai": "*",
+		"@oh-my-pi/pi-coding-agent": "*",
 		"typebox": "*"
 	},
 	"devDependencies": {
@@ -39,6 +48,6 @@
 	"type": "module",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/samuelrubiodev/pi-hyper-tools"
+		"url": "https://github.com/samuelrubiodev/omp-hyper-tools"
 	}
 }

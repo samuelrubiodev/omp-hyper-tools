@@ -180,7 +180,7 @@ export function renderRequestsMessage(summary: TrackingSummary): string {
 		`  Hour: ${summary.localHourlyRequests} request${summary.localHourlyRequests === 1 ? "" : "s"}`,
 		`  Day:  ${summary.localDailyRequests} request${summary.localDailyRequests === 1 ? "" : "s"}`,
 		"",
-		"Note: Server limits are authoritative from Hyper response headers. Local activity counts inference requests made from this Pi session/machine.",
+		"Note: Server limits are authoritative from Hyper response headers. Local activity counts inference requests made from this OMP session/machine.",
 	].join("\n");
 }
 

@@ -1,13 +1,3 @@
-import {
-	createProvider,
-	envApiKeyAuth,
-	lazyOAuth,
-	type OAuthAuth,
-	type ProviderStreams,
-	type SimpleStreamOptions,
-	type StreamOptions,
-} from "@earendil-works/pi-ai";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	createHyperAutocompleteProvider,
@@ -22,9 +12,21 @@ import {
 	renderRequestsMessage,
 	renderStatsMessage,
 } from "./dashboard.js";
-import { HYPER_API_BASE_URL, HYPERCREDITS_PER_USD, PROVIDER_DISPLAY_NAME, PROVIDER_NAME } from "./hyper.js";
-import { fetchHyperModels, getCachedRawModel } from "./models.js";
+import {
+	HYPER_API_BASE_URL,
+	HYPER_USER_AGENT,
+	HYPERCREDITS_PER_USD,
+	PROVIDER_DISPLAY_NAME,
+	PROVIDER_NAME,
+} from "./hyper.js";
+import {
+	fetchHyperModels,
+	getCachedRawModel,
+	getDefaultProviderModelConfigs,
+	toProviderModelConfig,
+} from "./models.js";
 import { createNotifier } from "./notify.js";
+import { loginHyper, refreshHyperToken } from "./oauth.js";
 import { createTracker, type Tracker } from "./tracking.js";
 
 type CreditStatusState =
@@ -73,8 +75,6 @@ export default function (pi: ExtensionAPI) {
 	function schedulePendingCreditStatusRefresh(): void {
 		if (!pendingCreditStatusRefresh || creditStatusRefreshWork !== undefined) return;
 
-		// Jiti evaluates transformed modules synchronously once import starts. A
-		// macrotask lets Pi finish its awaited lifecycle dispatch before that work.
 		const scheduled = setImmediate(() => {
 			void loadCreditStatus()
 				.then((runtime) => {
@@ -135,61 +135,42 @@ export default function (pi: ExtensionAPI) {
 		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
 
-	const baseApi = openAICompletionsApi();
-
-	const hyperApi: ProviderStreams = {
-		stream(model, context, options) {
-			const userOnResponse = options?.onResponse;
-			const wrappedOptions: StreamOptions = {
-				...options,
-				onResponse: async (response, m) => {
-					tracker.updateServerRateLimits(response.headers);
-					await userOnResponse?.(response, m);
-				},
-			};
-			return baseApi.stream(model, context, wrappedOptions);
+	// Register Provider with OMP
+	const providerConfig = {
+		baseUrl: HYPER_API_BASE_URL,
+		apiKey: "HYPER_API_KEY",
+		api: "openai-completions" as const,
+		authHeader: true,
+		headers: {
+			"User-Agent": HYPER_USER_AGENT,
 		},
-		streamSimple(model, context, options) {
-			const userOnResponse = options?.onResponse;
-			const wrappedOptions: SimpleStreamOptions = {
-				...options,
-				onResponse: async (response, m) => {
-					tracker.updateServerRateLimits(response.headers);
-					await userOnResponse?.(response, m);
-				},
-			};
-			return baseApi.streamSimple(model, context, wrappedOptions);
+		models: getDefaultProviderModelConfigs(),
+		oauth: {
+			name: PROVIDER_DISPLAY_NAME,
+			login: async (callbacks: any) => {
+				return loginHyper(callbacks);
+			},
+			refreshToken: async (credentials: any, signal?: AbortSignal) => {
+				return refreshHyperToken(credentials, signal);
+			},
+			getApiKey: (credentials: any) => {
+				return credentials.access;
+			},
+		},
+		fetchDynamicModels: async (apiKey: string | undefined) => {
+			const ctrl = new AbortController();
+			const rawModels = await fetchHyperModels({ signal: ctrl.signal, token: apiKey });
+			return rawModels.map((m) => toProviderModelConfig(m as any));
 		},
 	};
 
-	pi.registerProvider(
-		createProvider({
-			id: PROVIDER_NAME,
-			name: PROVIDER_DISPLAY_NAME,
-			baseUrl: HYPER_API_BASE_URL,
-			auth: {
-				apiKey: envApiKeyAuth("Hyper API key", ["HYPER_API_KEY"]),
-				oauth: lazyOAuth({
-					name: PROVIDER_DISPLAY_NAME,
-					load: async () => {
-						const { loginHyper, refreshHyperToken } = await import("./oauth.js");
-						return {
-							name: PROVIDER_DISPLAY_NAME,
-							login: loginHyper,
-							refresh: refreshHyperToken,
-							toAuth: async (credential) => ({ apiKey: credential.access }),
-						} satisfies OAuthAuth;
-					},
-				}),
-			},
-			models: [],
-			fetchModels: async ({ credential, signal }) => {
-				const token = credential?.type === "oauth" ? credential.access : credential?.key;
-				return fetchHyperModels({ signal, token });
-			},
-			api: hyperApi,
-		}),
-	);
+	if (typeof (pi as any).registerProvider === "function") {
+		try {
+			(pi as any).registerProvider(PROVIDER_NAME, providerConfig);
+		} catch {
+			// Fallback for legacy registerProvider signature if needed
+		}
+	}
 
 	pi.registerCommand("hyper", {
 		description: "Charm Hyper dashboard, credits, requests, and stats",
@@ -206,7 +187,7 @@ export default function (pi: ExtensionAPI) {
 				if (creditStatusState.kind === "disposed") return;
 
 				if (subcommand === "credits") {
-					if (runtime.getBalance() === undefined && ctx.model?.provider === PROVIDER_NAME) {
+					if (runtime.getBalance() === undefined) {
 						await runtime.refresh(ctx, ctx.model, true);
 					}
 					const msg = renderCreditsMessage(runtime.getBalance(), runtime.getLastRefreshedAt(), runtime.getLastError());
@@ -233,23 +214,21 @@ export default function (pi: ExtensionAPI) {
 
 					// Refresh models catalog if auth available
 					try {
-						const activeModel = ctx.model ?? {
-							id: "default",
-							provider: PROVIDER_NAME,
-							api: "openai-completions" as const,
-							baseUrl: HYPER_API_BASE_URL,
-							name: "Default",
-							reasoning: false,
-							input: ["text" as const],
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-							contextWindow: 1000,
-							maxTokens: 1000,
-						};
-						const auth = await ctx.modelRegistry.getApiKeyAndHeaders(activeModel);
-						if (auth.ok && auth.apiKey) {
-							const ctrl = new AbortController();
-							await fetchHyperModels({ token: auth.apiKey, signal: ctrl.signal });
+						let apiKey: string | undefined;
+						if (ctx.model?.provider === PROVIDER_NAME) {
+							const auth = await ctx.modelRegistry?.getApiKeyAndHeaders?.(ctx.model);
+							if (auth?.ok && auth.apiKey) {
+								apiKey = auth.apiKey;
+							}
 						}
+						if (!apiKey) {
+							apiKey = await ctx.modelRegistry?.getApiKeyForProvider?.(PROVIDER_NAME);
+						}
+						if (!apiKey) {
+							apiKey = process.env.HYPER_API_KEY;
+						}
+						const ctrl = new AbortController();
+						await fetchHyperModels({ token: apiKey, signal: ctrl.signal });
 					} catch {
 						// Non-fatal if model refresh fails
 					}
@@ -280,7 +259,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Default dashboard view: /hyper
-				if (runtime.getBalance() === undefined && ctx.model?.provider === PROVIDER_NAME) {
+				if (runtime.getBalance() === undefined) {
 					await runtime.refresh(ctx, ctx.model, true);
 				}
 
@@ -322,13 +301,28 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("model_select", (event, ctx) => {
+	// Subscribe to lifecycle and response events
+	pi.on("model_select" as any, (event: any, ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
-		if (event.model.provider !== PROVIDER_NAME) {
-			deactivateCreditStatus(ctx, event.model);
+		if (event?.model?.provider !== PROVIDER_NAME) {
+			deactivateCreditStatus(ctx, event?.model);
 			return;
 		}
 		scheduleCreditStatusRefresh(ctx, event.model);
+	});
+
+	pi.on("session_switch" as any, (_event: any, ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		if (ctx.model?.provider !== PROVIDER_NAME) {
+			deactivateCreditStatus(ctx, ctx.model);
+			return;
+		}
+		scheduleCreditStatusRefresh(ctx, ctx.model);
+	});
+
+	pi.on("turn_start", (_event, ctx) => {
+		if (!ctx.hasUI || ctx.model?.provider !== PROVIDER_NAME) return;
+		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
 
 	pi.on("after_provider_response", (event, _ctx) => {
@@ -338,7 +332,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role !== "assistant" || event.message.provider !== PROVIDER_NAME) return;
+		if (event.message.role !== "assistant") return;
+		const isHyper =
+			event.message.provider === PROVIDER_NAME ||
+			(typeof event.message.model === "string" && event.message.model.startsWith("hyper/")) ||
+			ctx.model?.provider === PROVIDER_NAME;
+
+		if (!isHyper) return;
 
 		const usage = event.message.usage;
 		tracker.recordRequest({
@@ -360,11 +360,6 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI && ctx.model?.provider === PROVIDER_NAME) {
 			scheduleCreditStatusRefresh(ctx, ctx.model);
 		}
-	});
-
-	pi.on("agent_settled", (_event, ctx) => {
-		if (creditStatusState.kind === "disposed" || !ctx.hasUI || ctx.model?.provider !== PROVIDER_NAME) return;
-		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
