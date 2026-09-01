@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An enhanced [Oh My Pi (OMP)](https://github.com/badlogic/pi-mono) extension for Charm's [Hyper](https://hyper.charm.land) inference provider, ported from `pi-hyper-tools` with full feature parity.
+An enhanced [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) extension for Charm's [Hyper](https://hyper.charm.land) inference provider, ported from `pi-hyper-tools` with full feature parity.
 
 This extension provides an interactive `/hyper` terminal dashboard, dynamic server rate-limit detection from HTTP response headers, live Hypercredit balance tracking, dual cost accounting, detailed token & cache statistics, multimodal vision support, and interactive slash command autocomplete for OMP.
 
