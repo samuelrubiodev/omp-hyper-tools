@@ -20,6 +20,7 @@ export interface RequestUsageData {
 }
 
 export interface InferenceRecord {
+	sessionId?: string;
 	timestamp: number;
 	model: string;
 	inputTokens: number;
@@ -100,6 +101,7 @@ export interface TrackingSummary {
 
 const InferenceRecordSchema = Type.Object(
 	{
+		sessionId: Type.Optional(Type.String()),
 		timestamp: Type.Number(),
 		model: Type.String(),
 		inputTokens: Type.Number(),
@@ -151,41 +153,38 @@ export function defaultUsageFilePath(): string {
  * - x-ratelimit-remaining-hour
  * - x-ratelimit-remaining-day
  */
-export function parseRateLimitHeaders(
-	headers: Record<string, string> | Headers | undefined,
-): Partial<ServerRateLimits> {
+export function parseRateLimitHeaders(headers: Record<string, string> | Headers | undefined): ServerRateLimits {
 	if (!headers) return {};
 
-	const getHeader = (name: string): string | undefined => {
-		const target = name.toLowerCase();
-		if (typeof (headers as Headers).get === "function") {
-			return (headers as Headers).get(target) ?? undefined;
+	const getHeader = (name: string): string | null => {
+		if ("get" in headers && typeof headers.get === "function") {
+			return headers.get(name) ?? headers.get(name.toLowerCase());
 		}
-		for (const [k, v] of Object.entries(headers)) {
+		const obj = headers as Record<string, string>;
+		const target = name.toLowerCase();
+		for (const [k, v] of Object.entries(obj)) {
 			if (k.toLowerCase() === target) {
-				return typeof v === "string" ? v : String(v);
+				return v;
 			}
 		}
-		return undefined;
+		return null;
 	};
 
-	const parseNum = (val: string | undefined): number | undefined => {
-		if (val === undefined || val === null || typeof val !== "string" || val.trim() === "") {
-			return undefined;
-		}
+	const parsePositiveInt = (val: string | null): number | undefined => {
+		if (!val) return undefined;
 		const parsed = Number.parseInt(val.trim(), 10);
 		return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 	};
 
-	const limitHour = parseNum(getHeader("x-ratelimit-limit-hour"));
-	const limitDay = parseNum(getHeader("x-ratelimit-limit-day"));
-	const remainingHour = parseNum(getHeader("x-ratelimit-remaining-hour"));
-	const remainingDay = parseNum(getHeader("x-ratelimit-remaining-day"));
+	const limitHour = parsePositiveInt(getHeader("x-ratelimit-limit-hour"));
+	const remainingHour = parsePositiveInt(getHeader("x-ratelimit-remaining-hour"));
+	const limitDay = parsePositiveInt(getHeader("x-ratelimit-limit-day"));
+	const remainingDay = parsePositiveInt(getHeader("x-ratelimit-remaining-day"));
 
-	const result: Partial<ServerRateLimits> = {};
+	const result: ServerRateLimits = {};
 	if (limitHour !== undefined) result.limitHour = limitHour;
-	if (limitDay !== undefined) result.limitDay = limitDay;
 	if (remainingHour !== undefined) result.remainingHour = remainingHour;
+	if (limitDay !== undefined) result.limitDay = limitDay;
 	if (remainingDay !== undefined) result.remainingDay = remainingDay;
 
 	if (Object.keys(result).length > 0) {
@@ -196,17 +195,7 @@ export function parseRateLimitHeaders(
 }
 
 /**
- * Calculate the cache hit rate: cached / (uncached_in + cached).
- * Returns 0 if total input tokens is 0.
- */
-export function calculateCacheHitRate(cachedTokens: number, uncachedInputTokens: number): number {
-	const totalInput = cachedTokens + uncachedInputTokens;
-	if (totalInput <= 0) return 0;
-	return cachedTokens / totalInput;
-}
-
-/**
- * Calculate estimated request cost in USD and Hypercredits based on model pricing.
+ * Calculate cost breakdown in USD and Hypercredits based on token rates per 1M tokens.
  */
 export function calculateEstimatedCost(
 	rates: ModelPricingRates | undefined,
@@ -228,22 +217,41 @@ export function calculateEstimatedCost(
 		};
 	}
 
-	const inputCostUsd = (usage.inputTokens * (rates.input || 0)) / 1_000_000;
-	const cacheReadCostUsd = (usage.cachedTokens * (rates.cacheRead || 0)) / 1_000_000;
-	const cacheWriteCostUsd = ((usage.cacheWriteTokens || 0) * (rates.cacheWrite || 0)) / 1_000_000;
-	const outputCostUsd = (usage.outputTokens * (rates.output || 0)) / 1_000_000;
+	const uncachedInputTokens = usage.inputTokens;
+	const cachedTokens = usage.cachedTokens;
+	const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+	const outputTokens = usage.outputTokens;
 
-	const costUsd = inputCostUsd + cacheReadCostUsd + cacheWriteCostUsd + outputCostUsd;
-	const costHc = costUsd * HYPERCREDITS_PER_USD;
+	const inputRate = rates.input ?? 0;
+	const outputRate = rates.output ?? 0;
+	const cacheReadRate = rates.cacheRead ?? 0;
+	const cacheWriteRate = rates.cacheWrite ?? inputRate; // Fall back to uncached rate if cacheWrite not specified
+
+	const inputCostUsd = (uncachedInputTokens / 1_000_000) * inputRate;
+	const outputCostUsd = (outputTokens / 1_000_000) * outputRate;
+	const cacheReadCostUsd = (cachedTokens / 1_000_000) * cacheReadRate;
+	const cacheWriteCostUsd = (cacheWriteTokens / 1_000_000) * cacheWriteRate;
+
+	const totalCostUsd = inputCostUsd + outputCostUsd + cacheReadCostUsd + cacheWriteCostUsd;
+	const totalCostHc = totalCostUsd * HYPERCREDITS_PER_USD;
 
 	return {
-		costUsd,
-		costHc,
+		costUsd: totalCostUsd,
+		costHc: totalCostHc,
 		inputCostUsd,
 		outputCostUsd,
 		cacheReadCostUsd,
 		cacheWriteCostUsd,
 	};
+}
+
+/**
+ * Calculate cache hit rate: cached / (uncached + cached).
+ */
+export function calculateCacheHitRate(cachedTokens: number, uncachedInputTokens: number): number {
+	const total = cachedTokens + uncachedInputTokens;
+	if (total <= 0) return 0;
+	return cachedTokens / total;
 }
 
 /**
@@ -283,6 +291,7 @@ export function readUsageStore(filePath = defaultUsageFilePath(), warn?: Warning
 		const parsed = JSON.parse(raw);
 		const validated = parseSchema(UsageStoreValidator, parsed, "usage.json");
 		const normalizedRecords: InferenceRecord[] = validated.records.map((r) => ({
+			sessionId: r.sessionId,
 			timestamp: r.timestamp,
 			model: r.model,
 			inputTokens: r.inputTokens,
@@ -366,11 +375,17 @@ export interface TrackerOptions {
 }
 
 export interface Tracker {
-	recordRequest(params: { model: string; usage?: RequestUsageData; timestamp?: number }): InferenceRecord;
+	setActiveSession(sessionId: string | undefined): void;
+	recordRequest(params: {
+		model: string;
+		usage?: RequestUsageData;
+		timestamp?: number;
+		sessionId?: string;
+	}): InferenceRecord;
 	updateServerRateLimits(headers: Record<string, string> | Headers | undefined): ServerRateLimits;
 	getServerRateLimits(): ServerRateLimits;
-	getSummary(now?: Date): TrackingSummary;
-	getSessionStats(): SessionUsageStats;
+	getSummary(now?: Date, sessionId?: string): TrackingSummary;
+	getSessionStats(sessionId?: string): SessionUsageStats;
 	resetSession(): void;
 	clearHistory(): void;
 }
@@ -384,6 +399,7 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 
 	let inMemoryRecords: InferenceRecord[] = [];
 	let currentServerLimits: ServerRateLimits = {};
+	let activeSessionId: string | undefined;
 
 	// Load initial server limits from disk if present
 	if (!isInMemory) {
@@ -393,7 +409,7 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 		}
 	}
 
-	let sessionStats: SessionUsageStats = {
+	let ephemeralSessionStats: SessionUsageStats = {
 		requests: 0,
 		inputTokens: 0,
 		cachedTokens: 0,
@@ -432,6 +448,10 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 		}
 	}
 
+	function setActiveSession(sessionId: string | undefined): void {
+		activeSessionId = sessionId;
+	}
+
 	function updateServerRateLimits(headers: Record<string, string> | Headers | undefined): ServerRateLimits {
 		const parsed = parseRateLimitHeaders(headers);
 		if (Object.keys(parsed).length > 0) {
@@ -451,8 +471,14 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 		return { ...currentServerLimits };
 	}
 
-	function recordRequest(params: { model: string; usage?: RequestUsageData; timestamp?: number }): InferenceRecord {
+	function recordRequest(params: {
+		model: string;
+		usage?: RequestUsageData;
+		timestamp?: number;
+		sessionId?: string;
+	}): InferenceRecord {
 		const now = params.timestamp ?? Date.now();
+		const targetSessionId = params.sessionId ?? activeSessionId;
 		const u = params.usage;
 		const inputTokens = u?.inputTokens ?? 0;
 		const cachedTokens = u?.cachedTokens ?? 0;
@@ -478,6 +504,7 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 			u?.actualCostHc ?? (actualCostUsd !== undefined ? actualCostUsd * HYPERCREDITS_PER_USD : undefined);
 
 		const record: InferenceRecord = {
+			sessionId: targetSessionId,
 			timestamp: now,
 			model: params.model,
 			inputTokens,
@@ -491,25 +518,28 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 			actualCostHc,
 		};
 
-		// Update in-memory session counters
-		sessionStats.requests += 1;
-		sessionStats.inputTokens += inputTokens;
-		sessionStats.cachedTokens += cachedTokens;
-		sessionStats.cacheWriteTokens += cacheWriteTokens;
-		sessionStats.outputTokens += outputTokens;
-		sessionStats.reasoningTokens += reasoningTokens;
-		sessionStats.totalTokens += inputTokens + cachedTokens + cacheWriteTokens + outputTokens;
-		sessionStats.costUsd += estimatedCostUsd;
-		sessionStats.costHc += estimatedCostHc;
+		// Update in-memory fallback session counters
+		ephemeralSessionStats.requests += 1;
+		ephemeralSessionStats.inputTokens += inputTokens;
+		ephemeralSessionStats.cachedTokens += cachedTokens;
+		ephemeralSessionStats.cacheWriteTokens += cacheWriteTokens;
+		ephemeralSessionStats.outputTokens += outputTokens;
+		ephemeralSessionStats.reasoningTokens += reasoningTokens;
+		ephemeralSessionStats.totalTokens += inputTokens + cachedTokens + cacheWriteTokens + outputTokens;
+		ephemeralSessionStats.costUsd += estimatedCostUsd;
+		ephemeralSessionStats.costHc += estimatedCostHc;
 
 		if (actualCostUsd !== undefined) {
-			sessionStats.actualCostUsd = (sessionStats.actualCostUsd ?? 0) + actualCostUsd;
+			ephemeralSessionStats.actualCostUsd = (ephemeralSessionStats.actualCostUsd ?? 0) + actualCostUsd;
 		}
 		if (actualCostHc !== undefined) {
-			sessionStats.actualCostHc = (sessionStats.actualCostHc ?? 0) + actualCostHc;
+			ephemeralSessionStats.actualCostHc = (ephemeralSessionStats.actualCostHc ?? 0) + actualCostHc;
 		}
 
-		sessionStats.cacheHitRate = calculateCacheHitRate(sessionStats.cachedTokens, sessionStats.inputTokens);
+		ephemeralSessionStats.cacheHitRate = calculateCacheHitRate(
+			ephemeralSessionStats.cachedTokens,
+			ephemeralSessionStats.inputTokens,
+		);
 
 		// Persist record
 		const store = getStore();
@@ -520,7 +550,66 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 		return record;
 	}
 
-	function getSummary(nowDate: Date = new Date()): TrackingSummary {
+	function getSessionStats(sessionId?: string): SessionUsageStats {
+		const targetSessionId = sessionId ?? activeSessionId;
+		if (!targetSessionId) {
+			return { ...ephemeralSessionStats };
+		}
+
+		const store = getStore();
+		const sessionRecords = store.records.filter((r) => r.sessionId === targetSessionId);
+		if (sessionRecords.length === 0) {
+			return { ...ephemeralSessionStats };
+		}
+
+		let requests = 0;
+		let inputTokens = 0;
+		let cachedTokens = 0;
+		let cacheWriteTokens = 0;
+		let outputTokens = 0;
+		let reasoningTokens = 0;
+		let costUsd = 0;
+		let costHc = 0;
+		let actualCostUsd: number | undefined;
+		let actualCostHc: number | undefined;
+
+		for (const rec of sessionRecords) {
+			requests += 1;
+			inputTokens += rec.inputTokens;
+			cachedTokens += rec.cachedTokens;
+			cacheWriteTokens += rec.cacheWriteTokens ?? 0;
+			outputTokens += rec.outputTokens;
+			reasoningTokens += rec.reasoningTokens ?? 0;
+			costUsd += rec.costUsd;
+			costHc += rec.costHc;
+			if (rec.actualCostUsd !== undefined) {
+				actualCostUsd = (actualCostUsd ?? 0) + rec.actualCostUsd;
+			}
+			if (rec.actualCostHc !== undefined) {
+				actualCostHc = (actualCostHc ?? 0) + rec.actualCostHc;
+			}
+		}
+
+		const totalTokens = inputTokens + cachedTokens + cacheWriteTokens + outputTokens;
+		const cacheHitRate = calculateCacheHitRate(cachedTokens, inputTokens);
+
+		return {
+			requests,
+			inputTokens,
+			cachedTokens,
+			cacheWriteTokens,
+			outputTokens,
+			reasoningTokens,
+			totalTokens,
+			costUsd,
+			costHc,
+			actualCostUsd,
+			actualCostHc,
+			cacheHitRate,
+		};
+	}
+
+	function getSummary(nowDate: Date = new Date(), sessionId?: string): TrackingSummary {
 		const hourStart = startOfLocalHour(nowDate);
 		const hourEnd = endOfLocalHour(nowDate);
 		const dayStart = startOfLocalDay(nowDate);
@@ -575,17 +664,13 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 			serverLimits: { ...currentServerLimits },
 			localHourlyRequests,
 			localDailyRequests,
-			session: { ...sessionStats },
+			session: getSessionStats(sessionId),
 			today: todayStats,
 		};
 	}
 
-	function getSessionStats(): SessionUsageStats {
-		return { ...sessionStats };
-	}
-
 	function resetSession(): void {
-		sessionStats = {
+		ephemeralSessionStats = {
 			requests: 0,
 			inputTokens: 0,
 			cachedTokens: 0,
@@ -602,15 +687,22 @@ export function createTracker(optionsOrWarn?: WarningSink | TrackerOptions): Tra
 	}
 
 	function clearHistory(): void {
-		resetSession();
 		inMemoryRecords = [];
 		currentServerLimits = {};
-		if (!isInMemory && existsSync(storagePath)) {
-			writeUsageStore({ version: 1, records: [] }, storagePath, warn);
+		resetSession();
+		if (!isInMemory) {
+			try {
+				if (existsSync(storagePath)) {
+					writeFileSync(storagePath, `${JSON.stringify({ version: 1, records: [] }, null, 2)}\n`, "utf-8");
+				}
+			} catch (error) {
+				warn?.(`Failed to clear Hyper usage history: ${String(error)}`);
+			}
 		}
 	}
 
 	return {
+		setActiveSession,
 		recordRequest,
 		updateServerRateLimits,
 		getServerRateLimits,

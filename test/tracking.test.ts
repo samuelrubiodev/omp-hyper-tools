@@ -198,4 +198,55 @@ describe("Dynamic Server Rate Limits & Local Request Tracking", () => {
 		assert.equal(summary.session.actualCostHc, 0.002);
 		assert.ok(summary.session.costUsd > 0);
 	});
+
+	it("Test 9: persists and restores session statistics when resuming a session by sessionId", () => {
+		const tmpFile = path.join(os.tmpdir(), `hyper-session-test-${Date.now()}.json`);
+		const testSessionId = "01a05e32-36f7-76a7-a3f1-2a48d5c94e41";
+		try {
+			// Session 1 writes records
+			const tracker1 = createTracker({ storagePath: tmpFile });
+			tracker1.recordRequest({
+				model: "deepseek-v4-flash",
+				sessionId: testSessionId,
+				usage: {
+					inputTokens: 100,
+					cachedTokens: 900,
+					outputTokens: 50,
+					reasoningTokens: 40,
+					actualCostUsd: 0.002,
+					actualCostHc: 0.04,
+				},
+			});
+
+			const sessionStats1 = tracker1.getSessionStats(testSessionId);
+			assert.equal(sessionStats1.requests, 1);
+			assert.equal(sessionStats1.inputTokens, 100);
+			assert.equal(sessionStats1.cachedTokens, 900);
+			assert.equal(sessionStats1.outputTokens, 50);
+			assert.equal(sessionStats1.reasoningTokens, 40);
+			assert.equal(sessionStats1.actualCostUsd, 0.002);
+			assert.equal(sessionStats1.cacheHitRate, 0.9);
+
+			// Session resumes in a new process / tracker instance
+			const tracker2 = createTracker({ storagePath: tmpFile });
+			tracker2.setActiveSession(testSessionId);
+
+			const sessionStats2 = tracker2.getSessionStats();
+			assert.equal(sessionStats2.requests, 1);
+			assert.equal(sessionStats2.inputTokens, 100);
+			assert.equal(sessionStats2.cachedTokens, 900);
+			assert.equal(sessionStats2.outputTokens, 50);
+			assert.equal(sessionStats2.reasoningTokens, 40);
+			assert.equal(sessionStats2.actualCostUsd, 0.002);
+			assert.equal(sessionStats2.cacheHitRate, 0.9);
+
+			const summary = tracker2.getSummary(undefined, testSessionId);
+			assert.equal(summary.session.requests, 1);
+			assert.equal(summary.session.cachedTokens, 900);
+		} finally {
+			if (fs.existsSync(tmpFile)) {
+				fs.unlinkSync(tmpFile);
+			}
+		}
+	});
 });

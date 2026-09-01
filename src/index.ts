@@ -194,15 +194,18 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
+				const sessionId = ctx.sessionManager?.getSessionId?.();
+				tracker.setActiveSession(sessionId);
+
 				if (subcommand === "requests") {
-					const summary = tracker.getSummary();
+					const summary = tracker.getSummary(undefined, sessionId);
 					const msg = renderRequestsMessage(summary);
 					ctx.ui.notify(msg, "info");
 					return;
 				}
 
 				if (subcommand === "stats") {
-					const summary = tracker.getSummary();
+					const summary = tracker.getSummary(undefined, sessionId);
 					const msg = renderStatsMessage(summary);
 					ctx.ui.notify(msg, "info");
 					return;
@@ -262,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 					await runtime.refresh(ctx, ctx.model, true);
 				}
 
-				const summary = tracker.getSummary();
+				const summary = tracker.getSummary(undefined, sessionId);
 				const activeModel = ctx.model?.provider === PROVIDER_NAME ? ctx.model : undefined;
 				const rawModel = activeModel ? getCachedRawModel(activeModel.id) : undefined;
 
@@ -302,6 +305,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Subscribe to lifecycle and response events
 	pi.on("model_select" as any, (event: any, ctx: ExtensionContext) => {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		tracker.setActiveSession(sessionId);
 		if (!ctx.hasUI) return;
 		if (event?.model?.provider !== PROVIDER_NAME) {
 			deactivateCreditStatus(ctx, event?.model);
@@ -311,6 +316,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_switch" as any, (_event: any, ctx: ExtensionContext) => {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		tracker.setActiveSession(sessionId);
 		if (!ctx.hasUI) return;
 		if (ctx.model?.provider !== PROVIDER_NAME) {
 			deactivateCreditStatus(ctx, ctx.model);
@@ -320,6 +327,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", (_event, ctx) => {
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		tracker.setActiveSession(sessionId);
 		if (!ctx.hasUI || ctx.model?.provider !== PROVIDER_NAME) return;
 		scheduleCreditStatusRefresh(ctx, ctx.model);
 	});
@@ -339,9 +348,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (!isHyper) return;
 
+		const sessionId = ctx.sessionManager?.getSessionId?.();
 		const usage = event.message.usage;
 		tracker.recordRequest({
 			model: event.message.responseModel ?? event.message.model,
+			sessionId,
 			usage: usage
 				? {
 						inputTokens: usage.input,
