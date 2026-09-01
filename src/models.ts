@@ -31,6 +31,26 @@ const ON_OFF_THINKING_LEVEL_MAP: ThinkingLevelMap = {
 
 export type ReasoningEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+const VALID_EFFORTS = new Set<ReasoningEffortLevel>(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+export function normalizeEffortLevels(levels?: string[]): ReasoningEffortLevel[] {
+	if (!levels || levels.length === 0) return [];
+	const normalized: ReasoningEffortLevel[] = [];
+	for (const level of levels) {
+		const lower = level.toLowerCase();
+		if (lower === "none" || lower === "off") {
+			// OMP manages 'off'/'none' natively in the UI; non-canonical efforts crash OMP's metadata lookup
+			continue;
+		}
+		if (VALID_EFFORTS.has(lower as ReasoningEffortLevel)) {
+			if (!normalized.includes(lower as ReasoningEffortLevel)) {
+				normalized.push(lower as ReasoningEffortLevel);
+			}
+		}
+	}
+	return normalized;
+}
+
 export interface ProviderModelConfig {
 	id: string;
 	name: string;
@@ -193,7 +213,7 @@ export const DEFAULT_HYPER_MODELS: ProviderModel[] = [
 		context_window: 1000000,
 		default_max_tokens: 384000,
 		can_reason: true,
-		reasoning_levels: ["none", "low", "high", "max"],
+		reasoning_levels: ["low", "high", "max"],
 		default_reasoning_effort: "high",
 		supports_attachments: false,
 	},
@@ -221,7 +241,7 @@ export const DEFAULT_HYPER_MODELS: ProviderModel[] = [
 		context_window: 1048576,
 		default_max_tokens: 384000,
 		can_reason: true,
-		reasoning_levels: ["none", "low", "high", "max"],
+		reasoning_levels: ["low", "high", "max"],
 		default_reasoning_effort: "high",
 		supports_attachments: false,
 	},
@@ -277,7 +297,7 @@ export const DEFAULT_HYPER_MODELS: ProviderModel[] = [
 		context_window: 128072,
 		default_max_tokens: 128072,
 		can_reason: true,
-		reasoning_levels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+		reasoning_levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
 		default_reasoning_effort: "medium",
 		supports_attachments: false,
 	},
@@ -446,14 +466,18 @@ export function parseV1ModelsPayload(payload: unknown): ProviderModel[] {
 	return parsed.data.map((item) => {
 		const name = item.display_name ?? item.name ?? item.id;
 		const vision = item.capabilities?.vision === true || item.supports_attachments === true;
-		const reasoningEfforts: string[] = Array.isArray(item.reasoning_levels)
+		const rawEfforts: string[] = Array.isArray(item.reasoning_levels)
 			? item.reasoning_levels
 			: Array.isArray((item.reasoning as any)?.effort_levels)
 				? (item.reasoning as any).effort_levels.map((e: any) => (typeof e === "string" ? e : e.value))
 				: [];
 
+		const reasoningEfforts = normalizeEffortLevels(rawEfforts);
+
 		const canReason =
-			typeof item.reasoning === "boolean" ? item.reasoning : (item.can_reason ?? reasoningEfforts.length > 0);
+			typeof item.reasoning === "boolean"
+				? item.reasoning
+				: (item.can_reason ?? (rawEfforts.length > 0 || reasoningEfforts.length > 0));
 
 		const defaultReasoningEffort =
 			item.default_reasoning_effort ??
@@ -480,10 +504,10 @@ export function parseV1ModelsPayload(payload: unknown): ProviderModel[] {
 
 export function toProviderModel(model: ProviderModel): Model<"openai-completions"> {
 	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
-	const reasoningLevels = model.reasoning_levels ?? [];
+	const reasoningLevels = normalizeEffortLevels(model.reasoning_levels);
 	const supportsReasoningEffort = reasoningLevels.length > 0;
 	const thinkingLevelMap = supportsReasoningEffort
-		? buildThinkingLevelMap(reasoningLevels)
+		? buildThinkingLevelMap(model.reasoning_levels ?? [])
 		: model.can_reason
 			? ON_OFF_THINKING_LEVEL_MAP
 			: undefined;
@@ -517,8 +541,8 @@ export function toProviderModel(model: ProviderModel): Model<"openai-completions
 
 export function toProviderModelConfig(model: ProviderModel): ProviderModelConfig {
 	const input: ("text" | "image")[] = model.supports_attachments ? ["text", "image"] : ["text"];
-	const reasoningLevels = model.reasoning_levels ?? [];
-	const supportsReasoningEffort = reasoningLevels.length > 0;
+	const validEfforts = normalizeEffortLevels(model.reasoning_levels);
+	const supportsReasoningEffort = validEfforts.length > 0;
 
 	return {
 		id: model.id,
@@ -528,7 +552,7 @@ export function toProviderModelConfig(model: ProviderModel): ProviderModelConfig
 		thinking: supportsReasoningEffort
 			? {
 					mode: "effort",
-					efforts: reasoningLevels as ReasoningEffortLevel[],
+					efforts: validEfforts,
 					requiresEffort: false,
 				}
 			: model.can_reason
@@ -556,7 +580,8 @@ export function toProviderModelConfig(model: ProviderModel): ProviderModelConfig
 
 export function buildThinkingLevelMap(levels: string[]): ThinkingLevelMap | undefined {
 	if (levels.length === 0) return undefined;
-	const availableLevels = new Set<string>(levels);
+	const validEfforts = normalizeEffortLevels(levels);
+	const availableLevels = new Set<string>(validEfforts);
 	const disabledReasoningLevel = levels.find((level) => level === "off" || level === "none") ?? null;
 	const result: ThinkingLevelMap = {
 		off: disabledReasoningLevel,
