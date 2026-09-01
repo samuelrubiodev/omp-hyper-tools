@@ -138,7 +138,6 @@ export default function (pi: ExtensionAPI) {
 	// Register Provider with OMP
 	const providerConfig = {
 		baseUrl: HYPER_API_BASE_URL,
-		apiKey: "HYPER_API_KEY",
 		api: "openai-completions" as const,
 		authHeader: true,
 		headers: {
