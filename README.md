@@ -7,8 +7,11 @@ An enhanced [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) extension for 
 This extension provides an interactive `/hyper` terminal dashboard, dynamic server rate-limit detection from HTTP response headers, live Hypercredit balance tracking, dual cost accounting, detailed token & cache statistics, multimodal vision support, and interactive slash command autocomplete for OMP.
 
 ```sh
-# Install in OMP
+# Install in OMP from git
 omp plugin install git:github.com/samuelrubiodev/omp-hyper-tools
+
+# Install in OMP from npm
+omp plugin install npm:omp-hyper-tools
 
 # Or install from local directory during development
 omp plugin install /path/to/omp-hyper-tools
